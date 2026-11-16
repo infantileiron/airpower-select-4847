@@ -8,7 +8,7 @@
 
 上游是压力/气量/温度/开机台数和电表小时记录；本应用替代时间窗校验、特征配置、模型比选和评议留痕；下游是工艺负责人安排安全可控的试点。
 
-四页分别为耗电样本、特征方案、模型比选、节能评议。三类核心实体为Sample（小时计量）、Run（特征/alpha配置与冻结模型结果）、Review（观察、业务动作和签核）；另有User和Audit。
+五页分别为耗电样本、特征方案、模型比选、节能评议、降级模型族。核心实体为Sample（小时计量）、Run（特征/alpha配置与冻结模型结果）、Review（观察、业务动作和签核）、Family（降级模型族与全部子集结果）、Batch（冻结的缺测工况批次与逐行路由）；另有User和Audit。
 
 |角色|权限|典型动作|
 |---|---|---|
@@ -39,6 +39,15 @@ docker compose exec -T backend python -m scripts.seed_demo
 6. 09:40 worker计算完成，模型比选页核对末段RMSE、基线、每折时间和系数单位，导出 `airpower-select-<id>.json`。
 7. 10:00 analyst起草“空载复核”，写明模型观察、安全边界和保持产量一致的试点动作。
 8. 10:10 admin签核后评议冻结；10:20 viewer下载 `airpower-review-<id>.json`。
+9. 11:00 传感器检修期间部分工况缺测：analyst在“降级模型族”页选定压力/气量/温度/开机台数，训练全部非空子集；整族成功后导入缺测工况批次，逐行核对选用子集、训练内误差与预测，导出 `airpower-batch-<id>.json`。
+
+## 降级模型族与缺测批次
+
+选定特征后枚举其全部非空子集（4项特征=15个成员），所有成员共用同一按小时排序的时间窗：前floor(0.8N)训练、后20%末段。每折只用该折训练部分fit StandardScaler，再fit Ridge；候选alpha与子集排序只依据训练段内3折平均CV RMSE，末段指标仅展示、从不参与选择或排序，标准化不读取末段/未来数据。整族成员全部训练成功才置为done并可发布；任一子集在训练段常量、样本缺口或非有限值都会令整族failed且不发布任何成员，可在修复样本后重新排队（`POST /families/{id}/requeue`）。同一时间窗、同一过程重复执行结果一致；worker重启恢复queued/running任务时按`state=='queued'`过滤，已完成结果不会被重复发布或改写。
+
+缺测工况按批导入（`POST /families/{id}/batches`，正文`text`每行一个JSON对象，缺失字段直接省略）。解析规则：hour必须为本地整点；只允许FEATURES键加hour/kwh/label/note，未知字段、非数值、非有限值、越界、批次内小时重复均记为该行错误；整批任一坏行即422整批拒绝、不入账。每行按已给特征可覆盖的子集，选择训练内CV RMSE最低者（同分取成员数更少、再按key）；缺测特征保持缺失，绝不补零；没有任何可用子集（例如只给对照噪声）同样整批拒绝。批次内容+父族快照校验生成`batch_key`，`(family_id,batch_key)`唯一；重复导入返回原批次并标记`duplicate=true`，不重复入账、不新增审计。
+
+批次冻结所属模型族id/名称/checksum、族特征与排序、每行原始已给特征、选用子集、排名、训练CV RMSE、预测及实际/残差（未给kwh时为空）。之后修订原始样本、重训或删除族版本都不改变已入账批次。整族失败时不能创建批次或导出。
 
 ## 算法与口径
 
@@ -56,12 +65,12 @@ Python3.11/FastAPI/SQLAlchemy/scikit-learn/NumPy、原生ES modules/CSS、Nginx�
 
 Nginx `/api/`转后端根路由，前端SPA回落。仅前端、后端和数据库映射宿主端口。用 `docker compose down -v --remove-orphans`清理本项目测试数据。
 
-目录：backend/src按models/schemas/services/controllers/routes/middlewares/config/constants/utils分工；frontend/src按api/stores/types/components/common/hooks/pages/router/utils/constants分工。共用表格、表单、状态标签；表单hooks/HTML转义utils；请求ID和安全头中间件，全局异常处理，写操作审计。首次表结构由ORM创建，migrations提供实测数据库导出的初始DDL，未带在线迁移执行器。
+目录：backend/src按models/schemas/services/controllers/routes/middlewares/config/constants/utils分工（降级族训练在services/analysis.py，批次解析与路由在services/degradation.py）；frontend/src按api/stores/types/components/common/hooks/pages/router/utils/constants分工。共用表格、表单、状态标签；表单hooks/HTML转义utils；请求ID和安全头中间件，全局异常处理，写操作审计。首次表结构由ORM创建，migrations提供实测数据库导出的初始DDL（002_degradation.sql为降级族/批次增量），未带在线迁移执行器。
 
 本地开发可先启动db/redis，backend安装requirements并设DATABASE_URL/REDIS_URL/JWT_SECRET后运行 `uvicorn src.main:app --reload`；前端使用Nginx或同源代理。依赖固定在requirements.txt。
 
-变量见.env.example：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO、NETWORK_SUBNET。独立子网10.253.110.0/24规避当前机器地址池耗尽，迁移可调整。角色ROLES、任务STATES、特征FEATURES和评议REVIEW_STATES分别定义在后端src/constants/enums.py与前端src/constants/enums.js，schema校验在backend/src/schemas/business.py，持久化列见models/entities.py。
+变量见.env.example：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、DB_PASSWORD、JWT_SECRET、SEED_DEMO、NETWORK_SUBNET。独立子网10.253.110.0/24规避当前机器地址池耗尽，迁移可调整。角色ROLES、任务STATES、族FAMILY_STATES、批BATCH_STATES、特征FEATURES和评议REVIEW_STATES分别定义在后端src/constants/enums.py与前端src/constants/enums.js，schema校验在backend/src/schemas/business.py，持久化列见models/entities.py。
 
 ## 范围与交付
 
-逐条表单/API录入及完整字段修订，无Excel批导、删除或分页。固定站点ZX-A01，无自动仪表采集；单worker；评议站内签核，没有外部通知或设备控制。Google Fonts离线时回退serif/sans-serif。测试脚本、截图、真实结果和已知差异在 `../../test-artifacts/gb-3110/TESTING.md`，源码不放截图或测试报告。MIT License，见LICENSE。
+逐条表单/API录入及完整字段修订，无Excel文件批导（缺测工况通过粘贴JSON行批处理）、删除或分页。固定站点ZX-A01，无自动仪表采集；单worker；评议站内签核，没有外部通知或设备控制。Google Fonts离线时回退serif/sans-serif。后端接口与算法测试在 `backend/tests`（`pip install -r backend/requirements-dev.txt && cd backend && pytest -q tests`，用 fakeredis 代替 Redis）；截图、真实运行结果与已知差异在 `../../test-artifacts/gb-3110/TESTING.md`，源码不放截图或测试报告。MIT License，见LICENSE。

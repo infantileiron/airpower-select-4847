@@ -33,6 +33,10 @@ class RunInput(BaseModel):
   import math
   if any(not math.isfinite(a) or a<=0 or a>10000 for a in v):raise ValueError('alpha必须为0到10000之间的有限正数')
   return v
+class FamilyInput(RunInput):
+ pass
+class BatchInput(BaseModel):
+ text:str=Field(min_length=1,max_length=500000)
 class ReviewInput(BaseModel):
  run_id:int=Field(gt=0)
  title:str=Field(min_length=2,max_length=100)

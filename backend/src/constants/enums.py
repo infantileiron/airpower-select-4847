@@ -1,4 +1,6 @@
 ROLES=('admin','analyst','viewer')
 STATES=('queued','running','done','failed')
+FAMILY_STATES=('queued','running','done','failed')
+BATCH_STATES=('done',)
 FEATURES=('pressure','flow','temperature','machines','sensor_noise')
 REVIEW_STATES=('draft','approved')
